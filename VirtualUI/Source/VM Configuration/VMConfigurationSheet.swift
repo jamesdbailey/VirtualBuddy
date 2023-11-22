@@ -20,7 +20,7 @@ public struct VMConfigurationSheet: View {
     /// Setting this saves the configuration.
     @Binding private var savedConfiguration: VBMacConfiguration
 
-    @State private var showingValidationErrors = false
+    @State private var showValidationErrors = false
     
     private var showsCancelButton: Bool { viewModel.context == .postInstall }
     private var customConfirmationButtonAction: ((VBMacConfiguration) -> Void)? = nil
@@ -34,7 +34,7 @@ public struct VMConfigurationSheet: View {
     init(configuration: Binding<VBMacConfiguration>, showingValidationErrors: Bool = false, customConfirmationButtonAction: ((VBMacConfiguration) -> Void)? = nil) {
         self.initialConfiguration = configuration.wrappedValue
         self._savedConfiguration = configuration
-        self._showingValidationErrors = .init(wrappedValue: showingValidationErrors)
+        self._showValidationErrors = .init(wrappedValue: showingValidationErrors)
         self.customConfirmationButtonAction = customConfirmationButtonAction
     }
     
@@ -57,7 +57,7 @@ public struct VMConfigurationSheet: View {
     @ViewBuilder
     private var buttons: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if showingValidationErrors {
+            if showValidationErrors {
                 validationErrors
             }
             HStack {
@@ -74,7 +74,7 @@ public struct VMConfigurationSheet: View {
                     validateAndSave()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(showingValidationErrors)
+                .disabled(showValidationErrors)
                 .controlSize(viewModel.context == .preInstall ? .large : .regular)
             }
         }
@@ -84,11 +84,11 @@ public struct VMConfigurationSheet: View {
         .background(Material.regular, in: Rectangle())
         .overlay(alignment: .top) { Divider() }
         .onChange(of: viewModel.config) { newValue in
-            guard showingValidationErrors else { return }
+            guard showValidationErrors else { return }
             
             Task {
                 if await viewModel.validate() == .supported {
-                    showingValidationErrors = false
+                    showValidationErrors = false
                 }
             }
         }
@@ -96,24 +96,14 @@ public struct VMConfigurationSheet: View {
     
     @ViewBuilder
     private var validationErrors: some View {
-        if viewModel.supportState != .supported {
-            VStack(alignment: .leading, spacing: 4) {
-                switch viewModel.supportState {
-                case .supported:
-                    EmptyView()
-                case .unsupported(let errors):
-                    ForEach(errors, id: \.self) { Text($0) }
-                        .foregroundColor(.red)
-                case .warnings(let warnings):
-                    ForEach(warnings, id: \.self) { Text($0) }
-                        .foregroundColor(.yellow)
-                }
-            }
+        if case .unsupported(let errors) = viewModel.supportState {
+            ForEach(errors, id: \.self) { Text($0) }
+                .foregroundColor(.red)
         }
     }
     
     private func validateAndSave() {
-        showingValidationErrors = true
+        showValidationErrors = true
 
         Task {
             let state = await viewModel.validate()
@@ -135,15 +125,21 @@ public struct VMConfigurationSheet: View {
 #if DEBUG
 struct VMConfigurationSheet_Previews: PreviewProvider {
     static var previews: some View {
-        _Template(context: .postInstall)
+        _Template(vm: .preview, context: .postInstall)
             .previewDisplayName("Post Install")
 
-        _Template(context: .preInstall)
+        _Template(vm: .preview, context: .preInstall)
             .previewDisplayName("Pre Install")
+
+        _Template(vm: .previewLinux, context: .postInstall)
+            .previewDisplayName("Linux - Post")
+
+        _Template(vm: .previewLinux, context: .preInstall)
+            .previewDisplayName("Linux - Pre")
     }
 
     struct _Template: View {
-        @State private var vm = VBVirtualMachine.preview
+        @State var vm: VBVirtualMachine
         var context: VMConfigurationContext
 
         var body: some View {

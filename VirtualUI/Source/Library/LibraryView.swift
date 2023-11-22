@@ -9,12 +9,11 @@ import SwiftUI
 import VirtualCore
 
 public struct LibraryView: View {
-    @StateObject private var library: VMLibraryController
+    @EnvironmentObject private var library: VMLibraryController
+    @EnvironmentObject private var sessionManager: VirtualMachineSessionUIManager
 
-    public init() {
-        self._library = .init(wrappedValue: .shared)
-    }
-    
+    public init() { }
+
     public var body: some View {
         libraryContents
             .frame(minWidth: 600, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
@@ -109,15 +108,42 @@ public struct LibraryView: View {
     @Environment(\.openCocoaWindow) private var openWindow
     
     private func launch(_ vm: VBVirtualMachine) {
+        guard !vm.needsInstall else {
+            recoverInstallation(for: vm)
+            return
+        }
+
         openWindow(id: vm.id) {
-            VirtualMachineSessionView(controller: VMController(with: vm))
+            VirtualMachineSessionView(controller: VMController(with: vm), ui: VirtualMachineSessionUI(with: vm))
                 .environmentObject(library)
+                .environmentObject(sessionManager)
         }
     }
 
-    private func launchInstallWizard() {
+    private func recoverInstallation(for vm: VBVirtualMachine) {
+        let alert = NSAlert()
+        alert.messageText = "Finish Installation"
+        alert.informativeText = "In order to start this virtual machine, its operating system needs to be installed. Would you like to install it now?"
+        alert.addButton(withTitle: "Install")
+        let deleteButton = alert.addButton(withTitle: "Delete")
+        deleteButton.hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+
+        let choice = alert.runModal()
+
+        switch choice {
+        case .alertFirstButtonReturn:
+            launchInstallWizard(restoring: vm)
+        case .alertSecondButtonReturn:
+            library.performMoveToTrash(for: vm)
+        default:
+            break
+        }
+    }
+
+    private func launchInstallWizard(restoring restoreVM: VBVirtualMachine? = nil) {
         openWindow {
-            VMInstallationWizard()
+            VMInstallationWizard(restoring: restoreVM)
                 .environmentObject(library)
         }
     }

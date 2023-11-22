@@ -16,7 +16,7 @@ public extension EnvironmentValues {
 }
 
 fileprivate struct OpenCocoaWindowActionKey: EnvironmentKey {
-    static let defaultValue = OpenCocoaWindowAction()
+    static let defaultValue = OpenCocoaWindowAction.default
 }
 
 /// An action that opens a new Mac window with SwiftUI content.
@@ -46,7 +46,9 @@ fileprivate struct OpenCocoaWindowActionKey: EnvironmentKey {
 /// }
 /// ```
 public struct OpenCocoaWindowAction {
-    
+
+    public static let `default` = OpenCocoaWindowAction()
+
     /// A token represents a window that's been opened by ``OpenCocoaWindowAction``.
     ///
     /// You may use the token to close the window from outside the view hierarchy hosted within it, such
@@ -95,7 +97,7 @@ public struct OpenCocoaWindowAction {
         if let existingController = manager[token] {
             existingController.showWindow(nil)
         } else {
-            let controller = HostingWindowController(rootView: content())
+            let controller = HostingWindowController(id: id, rootView: content())
 
             manager[token] = controller
         }

@@ -11,26 +11,38 @@ import Combine
 import Virtualization
 import VirtualCore
 
-struct VMInstallData: Hashable {
+struct VMInstallData: Hashable, Codable {
     var name = RandomNameGenerator.shared.newName()
     var cookie: String?
     var restoreImageInfo: VBRestoreImageInfo? {
         didSet {
             if let url = restoreImageInfo?.url {
-                restoreImageURL = url
+                installImageURL = url
             }
         }
     }
-    var restoreImageURL: URL?
-    
+    var installImageURL: URL?
+
     var downloadURL: URL? {
-        restoreImageURL ?? restoreImageInfo?.url
+        installImageURL ?? restoreImageInfo?.url
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, restoreImageInfo, installImageURL
     }
 }
 
 final class VMInstallationViewModel: ObservableObject {
-    
-    enum Step: Int, Hashable {
+
+    struct RestorableState: Codable {
+        var method: InstallMethod
+        var systemType: VBGuestType
+        var data: VMInstallData
+        var step: Step
+    }
+
+    enum Step: Int, Hashable, Codable {
+        case systemType
         case installKind
         case restoreImageInput
         case restoreImageSelection
@@ -47,8 +59,19 @@ final class VMInstallationViewModel: ObservableObject {
         case error(_ message: String)
     }
 
+    private var restorableState: RestorableState {
+        RestorableState(
+            method: self.installMethod,
+            systemType: self.selectedSystemType,
+            data: self.data,
+            step: self.step
+        )
+    }
+
     @Published var installMethod = InstallMethod.localFile
-    
+
+    @Published var selectedSystemType: VBGuestType = .mac
+
     @Published var machine: VBVirtualMachine?
 
     @Published var data = VMInstallData() {
@@ -61,11 +84,13 @@ final class VMInstallationViewModel: ObservableObject {
 
     @Published private(set) var state = State.idle
 
-    @Published var step = Step.installKind {
+    @Published var step = Step.systemType {
         didSet {
             guard step != oldValue else { return }
 
             performActions(for: step)
+
+            writeRestorationData()
         }
     }
 
@@ -76,13 +101,58 @@ final class VMInstallationViewModel: ObservableObject {
     @Published private(set) var showNextButton = true
     @Published  var disableNextButton = false
 
+    init(restoring restoreVM: VBVirtualMachine?) {
+        /// Skip OS selection if there's only a single supported OS.
+        step = VBGuestType.supportedByHost.count > 1 ? .systemType : .installKind
+
+        if let restoreVM {
+            restoreInstallation(with: restoreVM)
+        }
+    }
+
+    private func restoreInstallation(with vm: VBVirtualMachine) {
+        do {
+            guard let restoreData = vm.installRestoreData else {
+                throw CocoaError(.coderInvalidValue, userInfo: [NSLocalizedDescriptionKey: "VM is missing install restore data"])
+            }
+
+            let restoredState = try PropertyListDecoder().decode(RestorableState.self, from: restoreData)
+            
+            self.installMethod = restoredState.method
+            self.selectedSystemType = restoredState.systemType
+            self.data = restoredState.data
+            self.machine = vm
+            self.step = restoredState.step
+        } catch {
+            assertionFailure("Couldn't restore install: \(error)")
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    private func writeRestorationData() {
+        guard var machine else { return }
+
+        do {
+            let restoreData = try PropertyListEncoder().encode(restorableState)
+            machine.installRestoreData = restoreData
+            try machine.saveMetadata()
+            self.machine = machine
+        } catch {
+            assertionFailure("Failed to save install restore data: \(error)")
+        }
+    }
+
     private var needsDownload: Bool {
-        guard let url = data.restoreImageURL else { return true }
+        guard let url = data.installImageURL else { return true }
         return !url.isFileURL
     }
 
+    @Published private(set) var downloader: VBDownloader?
+
     func goNext() {
         switch step {
+            case .systemType:
+                step = .installKind
             case .installKind:
                 commitInstallMethod()
             case .restoreImageInput, .restoreImageSelection:
@@ -102,7 +172,7 @@ final class VMInstallationViewModel: ObservableObject {
 
     private func performActions(for step: Step) {
         switch step {
-            case .installKind:
+            case .systemType, .installKind:
                 showNextButton = true
             case .restoreImageInput:
                 showNextButton = true
@@ -112,12 +182,12 @@ final class VMInstallationViewModel: ObservableObject {
                 disableNextButton = true
             case .name:
                 commitOSSelection()
-            
+
                 showNextButton = true
             case .configuration:
                 showNextButton = false
                 disableNextButton = true
-            
+
                 Task {
                     do {
                         try await prepareModel()
@@ -127,6 +197,7 @@ final class VMInstallationViewModel: ObservableObject {
                 }
             case .download:
                 showNextButton = false
+                DispatchQueue.main.async { self.setupDownload() }
             case .install:
                 Task { await startInstallation() }
 
@@ -143,7 +214,7 @@ final class VMInstallationViewModel: ObservableObject {
     private func commitInstallMethod() {
         switch installMethod {
         case .localFile:
-            selectIPSWFile()
+            selectInstallFile()
         case .remoteOptions:
             step = .restoreImageSelection
         case .remoteManual:
@@ -158,38 +229,144 @@ final class VMInstallationViewModel: ObservableObject {
                 return
             }
 
-            self.data.restoreImageURL = url
+            self.data.installImageURL = url
         }
     }
 
+    @MainActor
+    private func setupDownload() {
+        guard let url = data.downloadURL else {
+            assertionFailure("Expected download URL to be available for download")
+            return
+        }
+
+        let d = VBDownloader(with: .shared, cookie: data.cookie)
+        self.downloader = d
+
+        d.$state.sink { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .done(let localURL):
+                self.handleDownloadCompleted(with: localURL)
+            case .failed(let message):
+                NSAlert(error: Failure(message)).runModal()
+            default:
+                break
+            }
+        }.store(in: &cancellables)
+
+        d.startDownload(with: url)
+    }
+
     func handleDownloadCompleted(with fileURL: URL) {
-        data.restoreImageURL = fileURL
-        goNext()
+        downloader = nil
+
+        data.installImageURL = fileURL
+
+        Task {
+            await MainActor.run {
+                do {
+                    try updateModelInstallerURL(with: fileURL)
+
+                    goNext()
+                } catch {
+                    state = .error("Failed to update the virtual machine settings after downloading the installer. \(error)")
+                }
+            }
+        }
     }
 
     private lazy var cancellables = Set<AnyCancellable>()
 
     private var vmInstaller: VZMacOSInstaller?
     private var progressObservation: NSKeyValueObservation?
-    
+
     @MainActor
     private func prepareModel() throws {
         let vmURL = VMLibraryController.shared.libraryURL
             .appendingPathComponent(data.name)
             .appendingPathExtension(VBVirtualMachine.bundleExtension)
 
-        let model = try VBVirtualMachine(bundleURL: vmURL)
-        
+        let model: VBVirtualMachine
+
+        switch selectedSystemType {
+        case .mac:
+            model = try VBVirtualMachine(bundleURL: vmURL, isNewInstall: true)
+        case .linux:
+            guard #available(macOS 13.0, *) else {
+                throw Failure("Linux virtual machine requires macOS 13 or later")
+            }
+            guard let url = data.installImageURL else {
+                throw Failure("Installing a Linux virtual machine requires an install image URL")
+            }
+            model = try VBVirtualMachine(creatingAtURL: vmURL, linuxInstallerURL: url)
+        }
+
         self.machine = model
+
+        writeRestorationData()
+    }
+
+    @MainActor
+    private func updateModelInstallerURL(with newURL: URL) throws {
+        assert(machine != nil, "This method requires the VM model to be available")
+        assert(newURL.isFileURL, "This method should be updating the installer URL with a local file URL, not a remote one!")
+        guard var machine else { return }
+
+        machine.metadata.installImageURL = newURL
+        try machine.saveMetadata()
     }
 
     @MainActor
     private func startInstallation() async {
-        guard let restoreURL = data.restoreImageURL else {
+        switch machine?.configuration.systemType {
+        case .mac:
+            await startMacInstallation()
+        case .linux:
+            guard #available(macOS 13, *) else {
+                state = .error("This configuration requires macOS 13")
+                break
+            }
+            await startLinuxInstallation()
+        case .none:
+            state = .error("Missing VM model or system type")
+        }
+    }
+
+    @available(macOS 13, *)
+    @MainActor
+    private func startLinuxInstallation() async {
+        guard let installURL = data.installImageURL else {
+            state = .error("Missing install image URL")
+            return
+        }
+
+        guard let model = machine else {
+            state = .error("Missing VM model")
+            return
+        }
+
+        do {
+            let config = try await VMInstance.makeConfiguration(for: model, installImageURL: installURL)
+            do {
+                try config.validate()
+            } catch {
+                throw Failure("Failed to validate configuration: \(String(describing: error))")
+            }
+
+            step = .done
+        } catch {
+            state = .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func startMacInstallation() async { // TODO: handle Linux installation
+        guard let restoreURL = data.installImageURL else {
             state = .error("Missing restore image URL")
             return
         }
-        
+
         guard let model = machine else {
             state = .error("Missing VM model")
             return
@@ -271,8 +448,8 @@ final class VMInstallationViewModel: ObservableObject {
         return true
     }
 
-    func selectIPSWFile() {
-        guard let url = NSOpenPanel.run(accepting: [.ipsw]) else {
+    func selectInstallFile() {
+        guard let url = NSOpenPanel.run(accepting: selectedSystemType.supportedRestoreImageTypes, defaultDirectoryKey: "restoreImage") else {
             return
         }
 
@@ -280,7 +457,7 @@ final class VMInstallationViewModel: ObservableObject {
     }
 
     func continueWithLocalFile(at url: URL) {
-        data.restoreImageURL = url
+        data.installImageURL = url
 
         step = .name
     }
@@ -292,8 +469,41 @@ final class VMInstallationViewModel: ObservableObject {
         vmInstaller = nil
     }
 
+    var confirmBeforeClosing: () async -> Bool {
+        { [weak self] in
+            guard let self else { return true }
+
+            guard self.step.needsConfirmationBeforeClosing else { return true }
+
+            let confirmed = await NSAlert.runConfirmationAlert(
+                title: "Cancel Installation?",
+                message: "If you close the window now, the virtual machine will not be ready for use. You can continue the installation later.",
+                continueButtonTitle: "Cancel Installation",
+                cancelButtonTitle: "Continue"
+            )
+
+            guard confirmed else { return false }
+
+            await MainActor.run {
+                self.downloader?.cancelDownload()
+                self.downloader = nil
+                self.vmInstaller = nil
+            }
+
+            return true
+        }
+    }
+
 }
 
-extension UTType {
-    static let ipsw = UTType(filenameExtension: "ipsw")!
+private extension VMInstallationViewModel.Step {
+    var needsConfirmationBeforeClosing: Bool {
+        switch self {
+        /// These steps are destructive if interrupted, so confirm before closing the wizard.
+        case .configuration, .download, .install:
+            return true
+        default:
+            return false
+        }
+    }
 }

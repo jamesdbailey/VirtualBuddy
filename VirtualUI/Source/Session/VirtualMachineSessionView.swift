@@ -7,39 +7,74 @@
 
 import SwiftUI
 import VirtualCore
+import Combine
 
 public struct VirtualMachineSessionView: View {
     @StateObject var controller: VMController
+    @StateObject var ui: VirtualMachineSessionUI
+
+    public init(controller: VMController, ui: VirtualMachineSessionUI) {
+        self._controller = .init(wrappedValue: controller)
+        self._ui = .init(wrappedValue: ui)
+    }
+
     @EnvironmentObject var library: VMLibraryController
+    @EnvironmentObject var sessionManager: VirtualMachineSessionUIManager
+
+    @Environment(\.cocoaWindow)
+    private var window
+
+    private var vbWindow: VBRestorableWindow? {
+        guard let window = window as? VBRestorableWindow else {
+            assertionFailure("VM window must be a VBRestorableWindow")
+            return nil
+        }
+        return window
+    }
 
     public var body: some View {
-        controllerStateView
+        ZStack {
+            controllerStateView
+        }
+            .toolbar {
+                if #available(macOS 14.0, *) {
+                    VirtualMachineControls<VMController>()
+                        .environmentObject(controller)
+                }
+            }
             .edgesIgnoringSafeArea(.all)
-            .frame(minWidth: 960, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
+            .frame(minWidth: 400, maxWidth: .infinity, minHeight: 400, maxHeight: .infinity)
             .background(backgroundView)
             .environmentObject(controller)
             .windowTitle(controller.virtualMachineModel.name)
             .windowStyleMask([.titled, .miniaturizable, .closable, .resizable])
-            .confirmBeforeClosingWindow {
-                guard controller.isStarting || controller.isRunning else { return true }
+            .confirmBeforeClosingWindow(callback: confirmBeforeClosing)
+            .onWindowKeyChange { [weak sessionManager, weak ui] isKey in
+                sessionManager?.focusedSessionChanged.send(isKey ? ui : nil)
+            }
+            .onAppearOnce {
+                guard vbWindow?.hasSavedFrame == false else { return }
+                guard let display = controller.virtualMachineModel.configuration.hardware.displayDevices.first else { return }
+                vbWindow?.resize(to: .fitScreen, for: display)
+            }
+            .onReceive(ui.resizeWindow) { size in
+                guard let display = controller.virtualMachineModel.configuration.hardware.displayDevices.first else {
+                    assertionFailure("VM doesn't have a display")
+                    return
+                }
 
-                let confirmed = await NSAlert.runConfirmationAlert(
-                    title: "Stop Virtual Machine?",
-                    message: "If you close the window now, the virtual machine will be stopped.",
-                    continueButtonTitle: "Stop VM",
-                    cancelButtonTitle: "Cancel"
-                )
-
-                guard confirmed else { return false }
-
-                try? await controller.forceStop()
-
-                /// Workaround for cursor disappearing due to it being captured
-                /// between the alert confirmation and the VM stopping.
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                NSCursor.unhide()
-
-                return true
+                vbWindow?.resize(to: size, for: display)
+            }
+            .onReceive(ui.setWindowAspectRatio) { ratio in
+                vbWindow?.applyAspectRatio(ratio)
+            }
+            .onReceive(screenshotTaken) { data in
+                controller.storeScreenshot(with: data)
+            }
+            .task {
+                if controller.options.autoBoot {
+                    Task { try? await controller.start() }
+                }
             }
     }
     
@@ -58,12 +93,16 @@ public struct VirtualMachineSessionView: View {
             pausedView(with: vm)
         }
     }
-    
+
+    private let screenshotTaken = VMScreenshotter.Subject()
+
     @ViewBuilder
     private func vmView(with vm: VZVirtualMachine) -> some View {
         SwiftUIVMView(
             controllerState: .constant(.running(vm)),
-            captureSystemKeys: controller.virtualMachineModel.configuration.captureSystemKeys
+            captureSystemKeys: controller.virtualMachineModel.configuration.captureSystemKeys,
+            automaticallyReconfiguresDisplay: .constant(controller.virtualMachineModel.configuration.hardware.displayDevices.count > 0 ? controller.virtualMachineModel.configuration.hardware.displayDevices[0].automaticallyReconfiguresDisplay : false),
+            screenshotSubject: screenshotTaken
         )
     }
     
@@ -100,10 +139,10 @@ public struct VirtualMachineSessionView: View {
     private var circularStartButton: some View {
         Button {
             if controller.canStart {
-                Task { await controller.startVM() }
+                Task { try? await controller.start() }
             } else if controller.canResume {
                 Task {
-                    try await controller.resume()
+                    try? await controller.resume()
                 }
             }
         } label: {
@@ -118,6 +157,27 @@ public struct VirtualMachineSessionView: View {
             Color.black
         } else {
             VMScreenshotBackgroundView(vm: $controller.virtualMachineModel)
+        }
+    }
+
+    private var confirmBeforeClosing: () async -> Bool {
+        { [weak controller] in
+            guard let controller else { return true }
+
+            guard controller.isStarting || controller.isRunning else { return true }
+
+            let confirmed = await NSAlert.runConfirmationAlert(
+                title: "Stop Virtual Machine?",
+                message: "If you close the window now, the virtual machine will be stopped.",
+                continueButtonTitle: "Stop VM",
+                cancelButtonTitle: "Cancel"
+            )
+
+            guard confirmed else { return false }
+
+            try? await controller.forceStop()
+
+            return true
         }
     }
 

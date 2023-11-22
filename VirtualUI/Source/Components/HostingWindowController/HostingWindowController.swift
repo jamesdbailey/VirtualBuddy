@@ -26,8 +26,12 @@ public final class HostingWindowController<Content>: NSWindowController, NSWindo
         )
     }
 
-    public init(rootView: Content, windowFactory: (() -> NSWindow)? = nil) {
+    public init(id: String? = nil, rootView: Content, windowFactory: (() -> NSWindow)? = nil) {
         let window = windowFactory?() ?? Self.makeDefaultWindow()
+
+        if let id {
+            window.identifier = .init(id)
+        }
         
         super.init(window: window)
 
@@ -120,13 +124,23 @@ protocol WindowChromeConsumer: AnyObject {
     var confirmBeforeClosingCallback: () async -> Bool { get set }
 }
 
-fileprivate final class HostingWindow: NSWindow {
+fileprivate final class HostingWindow: VBRestorableWindow {
     
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
     var confirmBeforeClosingCallback: () async -> Bool = { true }
+    
+    override func performClose(_ sender: Any?) {
+        /// This addresses a weird issue introduced after #257 where for some reason `VMController`
+        /// was being retained by a SwiftUI button when closing a VM window using Command+W
+        /// after opening multiple VM windows.
+        /// The button that was retaining the controller though a closure context was one of
+        /// the toolbar buttons, and for some reason not going directly through our `close()`
+        /// implementation here was triggering the leak :(
+        close()
+    }
 
     override func close() {
         Task {
@@ -138,5 +152,5 @@ fileprivate final class HostingWindow: NSWindow {
     private func closeWithoutConfirmation() {
         super.close()
     }
-    
+
 }

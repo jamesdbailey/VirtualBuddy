@@ -19,6 +19,13 @@ import SystemConfiguration
  the `@DecodableDefault` property wrapper can be used.
  */
 
+public enum VBGuestType: String, Identifiable, Codable, CaseIterable {
+    public var id: RawValue { rawValue }
+    
+    case mac
+    case linux
+}
+
 public struct VBMacConfiguration: Hashable, Codable {
     
     public enum SupportState: Hashable {
@@ -30,12 +37,17 @@ public struct VBMacConfiguration: Hashable, Codable {
     public static let currentVersion = 0
     @DecodableDefault.Zero public var version = VBMacConfiguration.currentVersion
 
+    @DecodableDefault.FirstCase
+    public var systemType: VBGuestType = .mac
+
     public var hardware = VBMacDevice.default
     public var sharedFolders = [VBSharedFolder]()
-    @DecodableDefault.False
-    public var sharedClipboardEnabled = false
+    @DecodableDefault.True
+    public var guestAdditionsEnabled = true
 
     @DecodableDefault.True public var captureSystemKeys = true
+
+    public var hasSharedFolders: Bool { !sharedFolders.filter(\.isEnabled).isEmpty }
 
 }
 
@@ -51,8 +63,8 @@ public struct VBManagedDiskImage: Identifiable, Hashable, Codable {
         self.format = format
     }
     
-    public static let defaultBootDiskImageSize: UInt64 = 128 * .storageGigabyte
-    public static let minimumBootDiskImageSize: UInt64 = 64 * .storageGigabyte
+    public static let defaultBootDiskImageSize: UInt64 = 64 * .storageGigabyte
+    public static let minimumBootDiskImageSize: UInt64 = 2 * .storageGigabyte
     public static let maximumBootDiskImageSize: UInt64 = 512 * .storageGigabyte
 
     public static let minimumExtraDiskImageSize: UInt64 = 1 * .storageGigabyte
@@ -172,12 +184,13 @@ public struct VBStorageDevice: Identifiable, Hashable, Codable {
 /// Configures a display device.
 /// **Read the note at the top of this file before modifying this**
 public struct VBDisplayDevice: Identifiable, Hashable, Codable {
-    public init(id: UUID = UUID(), name: String = "Default", width: Int = 1920, height: Int = 1080, pixelsPerInch: Int = 144) {
+    public init(id: UUID = UUID(), name: String = "Default", width: Int = 1920, height: Int = 1080, pixelsPerInch: Int = 144, automaticallyReconfiguresDisplay: Bool = false) {
         self.id = id
         self.name = name
         self.width = width
         self.height = height
         self.pixelsPerInch = pixelsPerInch
+        self.automaticallyReconfiguresDisplay = automaticallyReconfiguresDisplay
     }
     
     public var id = UUID()
@@ -185,6 +198,7 @@ public struct VBDisplayDevice: Identifiable, Hashable, Codable {
     public var width = 1920
     public var height = 1080
     public var pixelsPerInch = 144
+    @DecodableDefault.False public var automaticallyReconfiguresDisplay = false
 }
 
 /// Configures a network device.
@@ -237,6 +251,28 @@ public struct VBPointingDevice: Hashable, Codable {
     public var kind = Kind.mouse
 }
 
+/// Configures a keyboard device.
+/// **Read the note at the top of this file before modifying this**
+public struct VBKeyboardDevice: Hashable, Codable, ProvidesEmptyPlaceholder {
+    public enum Kind: Int, Identifiable, CaseIterable, Codable {
+        public var id: RawValue { rawValue }
+
+        case generic
+        case mac
+
+        public var name: String {
+            switch self {
+            case .generic: return "Generic"
+            case .mac: return "Mac"
+            }
+        }
+    }
+
+    public var kind = Kind.generic
+
+    public static var empty: VBKeyboardDevice { VBKeyboardDevice(kind: .generic) }
+}
+
 /// Configures sound input/output.
 /// **Read the note at the top of this file before modifying this**
 public struct VBSoundDevice: Identifiable, Hashable, Codable {
@@ -249,10 +285,11 @@ public struct VBSoundDevice: Identifiable, Hashable, Codable {
 /// Describes a Mac VM with its associated hardware configuration.
 /// **Read the note at the top of this file before modifying this**
 public struct VBMacDevice: Hashable, Codable {
-    public init(cpuCount: Int, memorySize: UInt64, pointingDevice: VBPointingDevice, displayDevices: [VBDisplayDevice], networkDevices: [VBNetworkDevice], soundDevices: [VBSoundDevice], storageDevices: [VBStorageDevice], NVRAM: [VBNVRAMVariable] = [VBNVRAMVariable]()) {
+    public init(cpuCount: Int, memorySize: UInt64, pointingDevice: VBPointingDevice, keyboardDevice: VBKeyboardDevice, displayDevices: [VBDisplayDevice], networkDevices: [VBNetworkDevice], soundDevices: [VBSoundDevice], storageDevices: [VBStorageDevice], NVRAM: [VBNVRAMVariable] = [VBNVRAMVariable]()) {
         self.cpuCount = cpuCount
         self.memorySize = memorySize
         self.pointingDevice = pointingDevice
+        self.keyboardDevice = keyboardDevice
         self.displayDevices = displayDevices
         self.networkDevices = networkDevices
         self.soundDevices = soundDevices
@@ -263,6 +300,8 @@ public struct VBMacDevice: Hashable, Codable {
     public var cpuCount: Int
     public var memorySize: UInt64
     public var pointingDevice: VBPointingDevice
+    @DecodableDefault.EmptyPlaceholder
+    public var keyboardDevice: VBKeyboardDevice
     public var displayDevices: [VBDisplayDevice]
     public var networkDevices: [VBNetworkDevice]
     public var soundDevices: [VBSoundDevice]
@@ -296,7 +335,7 @@ public struct VBSharedFolder: Identifiable, Hashable, Codable {
     /// ```
     public static let virtualBuddyShareName = "VirtualBuddyShared"
     
-    public init(id: UUID = UUID(), url: URL, isEnabled: Bool = true, isReadOnly: Bool = true, customMountPointName: String? = nil) {
+    public init(id: UUID = UUID(), url: URL, isEnabled: Bool = true, isReadOnly: Bool = false, customMountPointName: String? = nil) {
         self.id = id
         self.url = url
         self.isEnabled = isEnabled
@@ -309,7 +348,7 @@ public struct VBSharedFolder: Identifiable, Hashable, Codable {
     public var url: URL
     @DecodableDefault.True
     public var isEnabled = true
-    public var isReadOnly = true
+    public var isReadOnly = false
     
     /// A custom name for the folder when mounted in the guest OS.
     public var customMountPointName: String? = nil
@@ -401,6 +440,12 @@ public extension URL {
 
 public extension VBMacConfiguration {
     static var `default`: VBMacConfiguration { .init() }
+
+    func guestType(_ type: VBGuestType) -> Self {
+        var mSelf = self
+        mSelf.systemType = type
+        return mSelf
+    }
 }
 
 public extension VBMacDevice {
@@ -409,6 +454,7 @@ public extension VBMacDevice {
             cpuCount: .vb_suggestedVirtualCPUCount,
             memorySize: .vb_suggestedMemorySize,
             pointingDevice: .default,
+            keyboardDevice: .default,
             displayDevices: [.default],
             networkDevices: [.default],
             soundDevices: [.default],
@@ -419,6 +465,10 @@ public extension VBMacDevice {
 
 public extension VBPointingDevice {
     static var `default`: VBPointingDevice { .init() }
+}
+
+public extension VBKeyboardDevice {
+    static var `default`: VBKeyboardDevice { .empty }
 }
 
 public extension VBNetworkDevice {
@@ -437,7 +487,7 @@ public extension VBDisplayDevice {
     static var matchHost: VBDisplayDevice {
         guard let screen = NSScreen.main else { return .fallback }
 
-        guard let resolution = screen.deviceDescription[.resolution] as? NSSize else { return .fallback }
+        let resolution = screen.dpi
         guard let size = screen.deviceDescription[.size] as? NSSize else { return .fallback }
 
         let pointHeight = size.height - screen.safeAreaInsets.top
@@ -576,21 +626,23 @@ public extension VBMacDevice {
 
 public extension VBDisplayDevice {
 
-    static let minimumDisplayDimension = 800
+    static let minimumDisplayWidth = 800
+    
+    static let minimumDisplayHeight = 600
 
     static var maximumDisplayWidth = 6016
 
     static var maximumDisplayHeight = 3384
 
     static let displayWidthRange: ClosedRange<Int> = {
-        minimumDisplayDimension...maximumDisplayWidth
+        minimumDisplayWidth...maximumDisplayWidth
     }()
 
     static let displayHeightRange: ClosedRange<Int> = {
-        minimumDisplayDimension...maximumDisplayHeight
+        minimumDisplayHeight...maximumDisplayHeight
     }()
 
-    static let minimumDisplayPPI = 80
+    static let minimumDisplayPPI = 72
 
     static let maximumDisplayPPI = 218
 
@@ -638,4 +690,10 @@ public extension ProcessInfo {
     }
     
     var vb_mainDisplayHasNotch: Bool { NSScreen.main?.auxiliaryTopLeftArea != nil }
+}
+
+public extension NSScreen {
+    var dpi: CGSize {
+        (deviceDescription[NSDeviceDescriptionKey.resolution] as? CGSize) ?? CGSize(width: 72.0, height: 72.0)
+    }
 }

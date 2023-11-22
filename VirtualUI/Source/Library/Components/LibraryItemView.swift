@@ -35,10 +35,6 @@ struct LibraryItemView: View {
 
     var nameFieldFocus = BoolSubject()
 
-    #if ENABLE_HARDWARE_ID_CHANGE
-    @State private var isShowingDuplicateSheet = false
-    #endif
-
     private var isVMBooted: Bool { library.bootedMachineIdentifiers.contains(vm.id) }
 
     var body: some View {
@@ -65,7 +61,6 @@ struct LibraryItemView: View {
         .padding([.leading, .trailing, .top], 8)
         .padding(.bottom, 12)
         .background(Material.thin, in: backgroundShape)
-        .clipShape(backgroundShape)
         .background {
             if let image = vm.thumbnailImage() {
                 Image(nsImage: image)
@@ -74,6 +69,7 @@ struct LibraryItemView: View {
                     .opacity(isPressed ? 0.1 : 0.4)
             }
         }
+        .clipShape(backgroundShape)
         .shadow(color: Color.black.opacity(0.14), radius: 12)
         .shadow(color: Color.black.opacity(0.56), radius: 1)
         .scaleEffect(isPressed ? 0.96 : 1)
@@ -93,11 +89,6 @@ struct LibraryItemView: View {
             guard updatedName != vm.name else { return }
             self.name = updatedName
         }
-        #if ENABLE_HARDWARE_ID_CHANGE
-        .sheet(isPresented: $isShowingDuplicateSheet) {
-            DuplicateVMSheet(vm: vm)
-        }
-        #endif
     }
 
     private func refreshThumbnail() {
@@ -158,13 +149,7 @@ struct LibraryItemView: View {
         Divider()
 
         Button {
-            Task {
-                do {
-                    try await VMLibraryController.shared.moveToTrash(vm)
-                } catch {
-                    NSAlert(error: error).runModal()
-                }
-            }
+            VMLibraryController.shared.performMoveToTrash(for: vm)
         } label: {
             Text("Move to Trash")
         }
@@ -172,9 +157,6 @@ struct LibraryItemView: View {
     }
 
     private func duplicate() {
-        #if ENABLE_HARDWARE_ID_CHANGE
-        isShowingDuplicateSheet = true
-        #else
         Task {
             do {
                 try VMLibraryController.shared.duplicate(vm)
@@ -182,7 +164,18 @@ struct LibraryItemView: View {
                 NSAlert(error: error).runModal()
             }
         }
-        #endif
     }
 
+}
+
+extension VMLibraryController {
+    func performMoveToTrash(for vm: VBVirtualMachine) {
+        Task {
+            do {
+                try await VMLibraryController.shared.moveToTrash(vm)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+        }
+    }
 }

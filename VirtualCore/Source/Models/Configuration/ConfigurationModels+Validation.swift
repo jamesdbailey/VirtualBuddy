@@ -6,6 +6,7 @@
 //
 
 import Cocoa
+import UniformTypeIdentifiers
 
 public extension VBMacConfiguration {
     
@@ -22,7 +23,7 @@ public extension VBMacConfiguration {
             
             try config.validate()
             
-            return .supported
+            return hostSupportState
         } catch {
             return hostSupportState.merged(with: .unsupported([error.localizedDescription]))
         }
@@ -41,8 +42,12 @@ public extension VBMacConfiguration {
         if !hardware.pointingDevice.kind.isSupportedByHost {
             errors.append("\(hardware.pointingDevice.kind.name) requires macOS 13 or later.")
         }
-        if sharedClipboardEnabled, !VBMacConfiguration.isNativeClipboardSharingSupported {
-            warnings.append(VBMacConfiguration.clipboardSharingNotice)
+        if hasSharedFolders {
+            if VBMacConfiguration.isFileSharingSupported {
+                warnings.append(VBMacConfiguration.fileSharingNotice)
+            } else {
+                errors.append(VBMacConfiguration.fileSharingNotice)
+            }
         }
         if hardware.networkDevices.contains(where: { $0.kind == .bridge }), !VBNetworkDevice.appSupportsBridgedNetworking {
             errors.append(VBNetworkDevice.bridgeUnsupportedMessage)
@@ -50,8 +55,8 @@ public extension VBMacConfiguration {
         
         return SupportState(errors: errors, warnings: warnings)
     }
-    
-    static let isNativeClipboardSharingSupported: Bool = {
+
+    static let isFileSharingSupported: Bool = {
         if #available(macOS 13.0, *) {
             return true
         } else {
@@ -59,13 +64,13 @@ public extension VBMacConfiguration {
         }
     }()
 
-    static let clipboardSharingNotice: String = {
-        let guestAppInfo = "To use clipboard sync with previous versions of macOS, you can use the VirtualBuddyGuest app."
+    static let fileSharingNotice: String = {
+        let tip = "For previous OS versions, you can use the standard macOS file sharing feature in System Preferences > Sharing."
 
-        if isNativeClipboardSharingSupported {
-            return "Clipboard sync requires the virtual machine to be running macOS 13 or later. \(guestAppInfo)"
+        if isFileSharingSupported {
+            return "File sharing requires the virtual machine to be running macOS 13 or later. \(tip)"
         } else {
-            return "Clipboard sync requires macOS 13 or later. \(guestAppInfo)"
+            return "File sharing requires both the host Mac and the virtual machine to be running macOS 13 or later. \(tip)"
         }
     }()
 }
@@ -112,6 +117,18 @@ public extension VBNetworkDevice {
     static let bridgeUnsupportedMessage = "Bridged network devices are not available in this build of the app."
 }
 
+public extension VBDisplayDevice {
+    static let automaticallyReconfiguresDisplayWarningMessage = "Automatic display configuration is only recognized by VMs running macOS 14 and later."
+    
+    static var automaticallyReconfiguresDisplaySupportedByHost: Bool {
+        if #available(macOS 14.0, *) {
+            return true
+        } else {
+            return false
+        }
+    }
+}
+
 public extension VBPointingDevice.Kind {
     var warning: String? {
         guard self == .trackpad else { return nil }
@@ -130,4 +147,69 @@ public extension VBPointingDevice.Kind {
             return self == .mouse
         }
     }
+}
+
+public extension VBKeyboardDevice.Kind {
+    var warning: String? {
+        guard self != .generic else { return nil }
+        return "Mac keyboard is only recognized by VMs running macOS 13 and later."
+    }
+
+    var error: String? {
+        guard !isSupportedByHost else { return nil }
+        return "Mac keyboard requires macOS 14 or later on host and macOS 13 or later on VM."
+    }
+
+    var isSupportedByHost: Bool {
+        switch self {
+        case .generic:
+            return true
+        case .mac:
+            if #available(macOS 14.0, *) {
+                return true
+            } else {
+                return false
+            }
+        }
+    }
+}
+
+public extension VBGuestType {
+    var isSupportedByHost: Bool {
+        switch self {
+        case .mac:
+            return true
+        case .linux:
+            guard #available(macOS 13.0, *) else { return false }
+            #if DEBUG
+            return !UserDefaults.standard.bool(forKey: "VBSimulateLinuxGuestNotSupported")
+            #else
+            return true
+            #endif
+        }
+    }
+
+    static let supportedByHost: [VBGuestType] = {
+        allCases.filter(\.isSupportedByHost)
+    }()
+
+    var supportsVirtualTrackpad: Bool { self == .mac }
+
+    var supportsKeyboardCustomization: Bool { self == .mac }
+
+    var supportsDisplayPPI: Bool { self == .mac }
+
+    var supportedRestoreImageTypes: Set<UTType> {
+        switch self {
+        case .mac: return [.ipsw]
+        case .linux: return [.iso, .img]
+        }
+    }
+    
+}
+
+public extension UTType {
+    static let ipsw = UTType(filenameExtension: "ipsw")!
+    static let iso = UTType(filenameExtension: "iso")!
+    static let img = UTType(filenameExtension: "img")!
 }

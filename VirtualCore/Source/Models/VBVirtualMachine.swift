@@ -7,21 +7,13 @@ public typealias BoolSubject = PassthroughSubject<Bool, Never>
 
 public struct VBVirtualMachine: Identifiable {
 
-    #if ENABLE_HARDWARE_ID_CHANGE
-    public enum DuplicationMethod: Int, Identifiable, CaseIterable {
-        public var id: RawValue { rawValue }
-
-        case changeID
-        case clone
-    }
-    #endif
-
     public struct Metadata: Codable {
         public static let currentVersion = 1
         public var version = Self.currentVersion
         public var installFinished: Bool = false
         public var firstBootDate: Date? = nil
         public var lastBootDate: Date? = nil
+        public var installImageURL: URL? = nil
     }
 
     public var id: String { bundleURL.absoluteString }
@@ -30,7 +22,8 @@ public struct VBVirtualMachine: Identifiable {
 
     private var _configuration: VBMacConfiguration?
     private var _metadata: Metadata?
-    
+    private var _installRestoreData: Data?
+
     public var configuration: VBMacConfiguration {
         /// Masking private `_configuration` since it's initialized dynamically from a file.
         get { _configuration ?? .default }
@@ -41,6 +34,12 @@ public struct VBVirtualMachine: Identifiable {
         /// Masking private `_metadata` since it's initialized dynamically from a file.
         get { _metadata ?? .init() }
         set { _metadata = newValue }
+    }
+
+    public var installRestoreData: Data? {
+        /// Masking private `_installRestoreData` since it's initialized dynamically from a file.
+        get { _installRestoreData }
+        set { _installRestoreData = newValue }
     }
 
     public private(set) var didInvalidateThumbnail = VoidSubject()
@@ -57,7 +56,8 @@ extension VBVirtualMachine {
 
     static let metadataFilename = "Metadata.plist"
     static let configurationFilename = "Config.plist"
-    
+    static let installRestoreFilename = "Install.plist"
+
     func diskImageURL(for device: VBStorageDevice) -> URL {
         switch device.backing {
         case .managedImage(let image):
@@ -113,6 +113,10 @@ extension VBVirtualMachine {
         bundleURL.appendingPathComponent(".vbdata")
     }
 
+    public var needsInstall: Bool {
+        !metadata.installFinished || !FileManager.default.fileExists(atPath: hardwareModelURL.path)
+    }
+
 }
 
 public extension UTType {
@@ -121,7 +125,7 @@ public extension UTType {
 
 public extension VBVirtualMachine {
     
-    init(bundleURL: URL) throws {
+    init(bundleURL: URL, isNewInstall: Bool = false) throws {
         if !FileManager.default.fileExists(atPath: bundleURL.path) {
             #if DEBUG
             guard !ProcessInfo.isSwiftUIPreview else {
@@ -133,7 +137,7 @@ public extension VBVirtualMachine {
         }
         
         self.bundleURL = bundleURL
-        var (metadata, config) = try loadMetadata()
+        var (metadata, config, installRestore) = try loadMetadata()
 
         /// Migration from previous versions that didn't have a configuration file
         /// describing the storage devices.
@@ -145,9 +149,21 @@ public extension VBVirtualMachine {
             self.metadata = metadata
         } else {
             /// Migration from previous versions that didn't have a metadata file.
-            self.metadata = Metadata(installFinished: true, firstBootDate: .now, lastBootDate: .now)
+            self.metadata = Metadata(installFinished: !isNewInstall, firstBootDate: .now, lastBootDate: .now)
         }
 
+        self.installRestoreData = installRestore
+
+        try saveMetadata()
+    }
+
+    @available(macOS 13, *)
+    init(creatingAtURL bundleURL: URL, linuxInstallerURL: URL) throws {
+        guard !FileManager.default.fileExists(atPath: bundleURL.path) else { fatalError() }
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        self.bundleURL = bundleURL
+        self.configuration = .init(systemType: .linux)
+        self.metadata = Metadata(installFinished: false, firstBootDate: .now, lastBootDate: .now, installImageURL: linuxInstallerURL)
         try saveMetadata()
     }
 
@@ -161,20 +177,28 @@ public extension VBVirtualMachine {
 
         let metaData = try PropertyListEncoder().encode(metadata)
         try write(metaData, forMetadataFileNamed: Self.metadataFilename)
+
+        if let installRestoreData {
+            try write(installRestoreData, forMetadataFileNamed: Self.installRestoreFilename)
+        } else {
+            try? deleteMetadataFile(named: Self.installRestoreFilename)
+        }
     }
 
-    func loadMetadata() throws -> (Metadata?, VBMacConfiguration) {
+    func loadMetadata() throws -> (Metadata?, VBMacConfiguration, Data?) {
         #if DEBUG
-        guard !ProcessInfo.isSwiftUIPreview else { return (nil, .default) }
+        guard !ProcessInfo.isSwiftUIPreview else { return (nil, .default, nil) }
         #endif
 
         let metadata: Metadata?
         let config: VBMacConfiguration
+        let installRestore: Data?
 
         if let data = metadataContents(Self.configurationFilename) {
             config = try PropertyListDecoder().decode(VBMacConfiguration.self, from: data)
         } else {
-            config = .default
+            /// Linux guests don't go through this code path, so it should be safe to assume Mac here (famous last words).
+            config = .default.guestType(.mac)
         }
 
         if let data = metadataContents(Self.metadataFilename) {
@@ -183,7 +207,13 @@ public extension VBVirtualMachine {
             metadata = nil
         }
 
-        return (metadata, config)
+        if let data = metadataContents(Self.installRestoreFilename) {
+            installRestore = data
+        } else {
+            installRestore = nil
+        }
+
+        return (metadata, config, installRestore)
     }
 
     mutating func reloadMetadata() {
@@ -191,13 +221,14 @@ public extension VBVirtualMachine {
         guard !ProcessInfo.isSwiftUIPreview else { return }
         #endif
         
-        guard let (metadata, config) = try? loadMetadata() else {
+        guard let (metadata, config, installRestore) = try? loadMetadata() else {
             assertionFailure("Failed to reload metadata")
             return
         }
 
         self.metadata = metadata ?? .init()
         self.configuration = config
+        self.installRestoreData = installRestore
     }
 
 }

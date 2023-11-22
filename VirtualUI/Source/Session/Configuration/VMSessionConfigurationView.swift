@@ -12,13 +12,23 @@ struct VMSessionConfigurationView: View {
     @EnvironmentObject var controller: VMController
 
     @State private var isShowingVMSettings = false
-    
+
+    private var vm: VBVirtualMachine { controller.virtualMachineModel }
+
     var body: some View {
         VStack(alignment: .trailing) {
             Group {
-                HStack {
-                    Text("Boot in recovery mode")
-                    Toggle("Boot in recovery mode", isOn: $controller.options.bootInRecoveryMode)
+                if showInstallDeviceOption {
+                    HStack {
+                        Text("Boot on install drive")
+                        Toggle("Boot on install drive", isOn: $controller.options.bootOnInstallDevice)
+                    }
+                }
+                if showRecoveryModeOption {
+                    HStack {
+                        Text("Boot in recovery mode")
+                        Toggle("Boot in recovery mode", isOn: $controller.options.bootInRecoveryMode)
+                    }
                 }
                 HStack {
                     Text("Capture system keyboard shortcuts")
@@ -41,9 +51,13 @@ struct VMSessionConfigurationView: View {
             VMConfigurationSheet(
                 configuration: $controller.virtualMachineModel.configuration
             )
-            .environmentObject(VMConfigurationViewModel(controller.virtualMachineModel))
+            .environmentObject(VMConfigurationViewModel(vm))
         }
     }
+    
+    private var showInstallDeviceOption: Bool { vm.configuration.systemType == .linux && vm.metadata.installImageURL != nil }
+
+    private var showRecoveryModeOption: Bool { vm.configuration.systemType == .mac }
 }
 
 struct GroupBackgroundModifier: ViewModifier {

@@ -11,17 +11,21 @@ import Combine
 
 public struct VMInstallationWizard: View {
     @EnvironmentObject var library: VMLibraryController
-    @StateObject var viewModel = VMInstallationViewModel()
+    @StateObject var viewModel: VMInstallationViewModel
 
     @Environment(\.closeWindow) var closeWindow
-    
-    public init() { }
-    
+
+    public init(restoring restoreVM: VBVirtualMachine? = nil) {
+        self._viewModel = .init(wrappedValue: VMInstallationViewModel(restoring: restoreVM))
+    }
+
     private let stepValidationStateChanged = PassthroughSubject<Bool, Never>()
 
     public var body: some View {
         VStack {
             switch viewModel.step {
+                case .systemType:
+                    guestSystemTypeSelection
                 case .installKind:
                     installKindSelection
                 case .restoreImageInput:
@@ -61,7 +65,10 @@ public struct VMInstallationWizard: View {
         .windowStyleMask([.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView])
         .windowTitleHidden(true)
         .windowTitleBarTransparent(true)
-        .windowTitle("New macOS VM")
+        .windowTitle("New Virtual Machine")
+        .confirmBeforeClosingWindow { [weak viewModel] in
+            await viewModel?.confirmBeforeClosing() ?? true
+        }
         .onReceive(stepValidationStateChanged) { isValid in
             viewModel.disableNextButton = !isValid
         }
@@ -70,18 +77,31 @@ public struct VMInstallationWizard: View {
     }
 
     @ViewBuilder
+    private var guestSystemTypeSelection: some View {
+        VStack {
+            InstallationWizardTitle("Select an Operating System")
+
+            GuestTypePicker(selection: $viewModel.selectedSystemType)
+        }
+        .frame(minWidth: 400, minHeight: 360)
+    }
+
+    @ViewBuilder
     private var installKindSelection: some View {
         VStack {
-            InstallationWizardTitle("Select an installation method:")
+            InstallationWizardTitle("How Would You Like to Install \(viewModel.selectedSystemType.name)?")
 
-            InstallMethodPicker(selection: $viewModel.installMethod)
+            InstallMethodPicker(
+                guestType: viewModel.selectedSystemType,
+                selection: $viewModel.installMethod
+            )
         }
     }
 
     @ViewBuilder
     private var restoreImageURLInput: some View {
         VStack {
-            InstallationWizardTitle("Enter the URL for the macOS IPSW:")
+            InstallationWizardTitle(viewModel.selectedSystemType.customURLPrompt)
 
             TextField("URL", text: $viewModel.provisionalRestoreImageURL, onCommit: viewModel.goNext)
                 .textFieldStyle(.roundedBorder)
@@ -92,10 +112,11 @@ public struct VMInstallationWizard: View {
     @ViewBuilder
     private var restoreImageSelection: some View {
         VStack {
-            InstallationWizardTitle("Pick a macOS Version to Download")
+            InstallationWizardTitle(viewModel.selectedSystemType.restoreImagePickerPrompt)
             
             RestoreImagePicker(
                 selection: $viewModel.data.restoreImageInfo,
+                guestType: viewModel.selectedSystemType,
                 validationChanged: stepValidationStateChanged,
                 onUseLocalFile: { localURL in
                     viewModel.continueWithLocalFile(at: localURL)
@@ -106,7 +127,7 @@ public struct VMInstallationWizard: View {
     @ViewBuilder
     private var configureVM: some View {
         VStack {
-            InstallationWizardTitle("Configure Your Virtual Mac")
+            InstallationWizardTitle("Configure Your Virtual Machine")
 
             if let machine = viewModel.machine {
                 InstallConfigurationStepView(vm: machine) { configuredModel in
@@ -124,16 +145,14 @@ public struct VMInstallationWizard: View {
     @ViewBuilder
     private var renameVM: some View {
         VStack {
-            InstallationWizardTitle("Name Your Virtual Mac")
+            InstallationWizardTitle("Name Your Virtual Machine")
 
-            VirtualMachineNameField(name: $viewModel.data.name, onCommit: viewModel.goNext)
+            VirtualMachineNameField(name: $viewModel.data.name)
         }
     }
 
     private var vmDisplayName: String {
-        viewModel.data.name.isEmpty ?
-        viewModel.data.restoreImageURL?.lastPathComponent ?? "-"
-        : viewModel.data.name
+        viewModel.data.name.isEmpty ? viewModel.selectedSystemType.name : viewModel.data.name
     }
 
     @ViewBuilder
@@ -141,10 +160,8 @@ public struct VMInstallationWizard: View {
         VStack {
             InstallationWizardTitle("Downloading \(vmDisplayName)")
 
-            if let url = viewModel.data.downloadURL {
-                RestoreImageDownloadView(imageURL: url, cookie: viewModel.data.cookie) { fileURL in
-                    viewModel.handleDownloadCompleted(with: fileURL)
-                }
+            if let downloader = viewModel.downloader {
+                RestoreImageDownloadView(downloader: downloader)
             }
         }
     }
@@ -164,7 +181,7 @@ public struct VMInstallationWizard: View {
         VStack {
             InstallationWizardTitle(vmDisplayName)
 
-            Text("Your virtual Mac is ready!")
+            Text(viewModel.selectedSystemType.installFinishedMessage)
         }
     }
 

@@ -27,6 +27,9 @@ struct VMConfigurationView: View {
     @AppStorage("config.pointing.collapsed")
     private var pointingCollapsed = true
     
+    @AppStorage("config.keyboard.collapsed")
+    private var keyboardCollapsed = true
+
     @AppStorage("config.network.collapsed")
     private var networkCollapsed = true
     
@@ -36,19 +39,40 @@ struct VMConfigurationView: View {
     @AppStorage("config.sharing.collapsed")
     private var sharingCollapsed = true
 
+    private var systemType: VBGuestType { viewModel.config.systemType }
+
     private var showBootDiskSection: Bool { viewModel.context == .preInstall }
+
+    private var showPointingDeviceSection: Bool { systemType.supportsVirtualTrackpad }
+
+    private var showKeyboardDeviceSection: Bool { systemType.supportsKeyboardCustomization }
+
+    private var showDisplayPPISelection: Bool { systemType.supportsDisplayPPI }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if showBootDiskSection {
                 bootDisk
             }
+
             general
+
             storage
+
             display
-            pointingDevice
+
+            if showPointingDeviceSection {
+                pointingDevice
+            }
+
+            if showKeyboardDeviceSection {
+                keyboardDevice
+            }
+
             network
+
             sound
+
             sharing
                 .frame(minWidth: 0, idealWidth: VMConfigurationSheet.defaultWidth)
         }
@@ -144,13 +168,15 @@ struct VMConfigurationView: View {
         ConfigurationSection($displayCollapsed) {
             DisplayConfigurationView(
                 device: $viewModel.config.hardware.displayDevices[0],
-                selectedPreset: $viewModel.selectedDisplayPreset
+                selectedPreset: $viewModel.selectedDisplayPreset,
+                canChangePPI: showDisplayPPISelection
             )
         } header: {
             summaryHeader("Display", systemImage: "display", summary: viewModel.config.displaySummary) {
                 DisplayConfigurationView(
                     device: $viewModel.config.hardware.displayDevices[0],
-                    selectedPreset: $viewModel.selectedDisplayPreset
+                    selectedPreset: $viewModel.selectedDisplayPreset,
+                    canChangePPI: showDisplayPPISelection
                 )
                 .presetPicker
                 .frame(width: 24)
@@ -170,7 +196,20 @@ struct VMConfigurationView: View {
             )
         }
     }
-    
+
+    @ViewBuilder
+    private var keyboardDevice: some View {
+        ConfigurationSection($keyboardCollapsed) {
+            KeyboardDeviceConfigurationView(hardware: $viewModel.config.hardware)
+        } header: {
+            summaryHeader(
+                "Keyboard Device",
+                systemImage: "keyboard",
+                summary: viewModel.config.keyboardDeviceSummary
+            )
+        }
+    }
+
     @ViewBuilder
     private var network: some View {
         ConfigurationSection($networkCollapsed) {
