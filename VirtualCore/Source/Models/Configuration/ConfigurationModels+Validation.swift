@@ -7,6 +7,7 @@
 
 import Cocoa
 import UniformTypeIdentifiers
+import Virtualization
 
 public extension VBMacConfiguration {
     
@@ -56,13 +57,15 @@ public extension VBMacConfiguration {
         return SupportState(errors: errors, warnings: warnings)
     }
 
-    static let isFileSharingSupported: Bool = {
-        if #available(macOS 13.0, *) {
-            return true
-        } else {
-            return false
-        }
+    static let isFileSharingSupported = true
+
+    static let rosettaSupported: Bool = {
+        VZLinuxRosettaDirectoryShare.availability != VZLinuxRosettaAvailability.notSupported
     }()
+
+    static func rosettaInstalled() -> Bool {
+        VZLinuxRosettaDirectoryShare.availability == VZLinuxRosettaAvailability.installed
+    }
 
     static let fileSharingNotice: String = {
         let tip = "For previous OS versions, you can use the standard macOS file sharing feature in System Preferences > Sharing."
@@ -73,6 +76,18 @@ public extension VBMacConfiguration {
             return "File sharing requires both the host Mac and the virtual machine to be running macOS 13 or later. \(tip)"
         }
     }()
+
+    static func rosettaSharingNotice() -> String? {
+        if rosettaSupported {
+            if rosettaInstalled() {
+                return nil
+            } else {
+                return "Rosetta is not installed. Run `softwareupdate --install-rosetta` to install Rosetta."
+            }
+        } else {
+            return "Rosetta for Linux requires the host Mac to be running macOS 13 or later."
+        }
+    }
 }
 
 public extension VBMacConfiguration.SupportState {
@@ -140,13 +155,7 @@ public extension VBPointingDevice.Kind {
         return "Trackpad requires both host and VM to be on macOS 13 or later."
     }
 
-    var isSupportedByHost: Bool {
-        if #available(macOS 13.0, *) {
-            return true
-        } else {
-            return self == .mouse
-        }
-    }
+    var isSupportedByHost: Bool { true }
 }
 
 public extension VBKeyboardDevice.Kind {
@@ -175,19 +184,7 @@ public extension VBKeyboardDevice.Kind {
 }
 
 public extension VBGuestType {
-    var isSupportedByHost: Bool {
-        switch self {
-        case .mac:
-            return true
-        case .linux:
-            guard #available(macOS 13.0, *) else { return false }
-            #if DEBUG
-            return !UserDefaults.standard.bool(forKey: "VBSimulateLinuxGuestNotSupported")
-            #else
-            return true
-            #endif
-        }
-    }
+    var isSupportedByHost: Bool { true }
 
     static let supportedByHost: [VBGuestType] = {
         allCases.filter(\.isSupportedByHost)
@@ -199,6 +196,10 @@ public extension VBGuestType {
 
     var supportsDisplayPPI: Bool { self == .mac }
 
+    var supportsRosettaMount: Bool { self == .linux }
+
+    var supportsStateRestoration: Bool { self == .mac }
+
     var supportedRestoreImageTypes: Set<UTType> {
         switch self {
         case .mac: return [.ipsw]
@@ -206,6 +207,10 @@ public extension VBGuestType {
         }
     }
     
+}
+
+public extension VBVirtualMachine {
+    var supportsStateRestoration: Bool { configuration.systemType.supportsStateRestoration }
 }
 
 public extension UTType {

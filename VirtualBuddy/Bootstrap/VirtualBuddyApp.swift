@@ -16,16 +16,20 @@ struct VirtualBuddyApp: App {
     @NSApplicationDelegateAdaptor
     var appDelegate: VirtualBuddyAppDelegate
 
-    @StateObject private var settingsContainer = VBSettingsContainer.current
-    @StateObject private var updateController = SoftwareUpdateController.shared
-    @StateObject private var library = VMLibraryController.shared
-    @StateObject private var sessionManager = VirtualMachineSessionUIManager.shared
+    private var settingsContainer: VBSettingsContainer { appDelegate.settingsContainer }
+    private var updateController: SoftwareUpdateController { appDelegate.updateController }
+    private var library: VMLibraryController { appDelegate.library }
+    private var sessionManager: VirtualMachineSessionUIManager { appDelegate.sessionManager }
 
-    @Environment(\.openCocoaWindow)
+    @Environment(\.openWindow)
     private var openWindow
 
+    @StateObject private var updatesController = SoftwareUpdateController.shared
+
+    private let mainWindowTitle: String = Bundle.main.vbFullVersionDescription
+
     var body: some Scene {
-        WindowGroup(id: "library") {
+        Window(Text(mainWindowTitle), id: .vb_libraryWindowID) {
             LibraryView()
                 .onAppearOnce(perform: updateController.activate)
                 .environmentObject(library)
@@ -45,12 +49,19 @@ struct VirtualBuddyApp: App {
                 VirtualMachineWindowCommands()
                     .environmentObject(sessionManager)
             }
+
+            CommandGroup(after: .windowArrangement) {
+                Button("Library") {
+                    openWindow(id: .vb_libraryWindowID)
+                }
+                .keyboardShortcut(KeyEquivalent("0"), modifiers: .command)
+            }
         }
         
         Settings {
-            PreferencesView(deepLinkSentinel: DeepLinkHandler.shared.sentinel)
+            PreferencesView(deepLinkSentinel: DeepLinkHandler.shared.sentinel, enableAutomaticUpdates: $updatesController.automaticUpdatesEnabled)
                 .environmentObject(settingsContainer)
-                .frame(minWidth: 420, maxWidth: .infinity, minHeight: 320, maxHeight: .infinity)
+                .frame(minWidth: 420, maxWidth: .infinity, minHeight: 370, maxHeight: .infinity)
         }
     }
 }

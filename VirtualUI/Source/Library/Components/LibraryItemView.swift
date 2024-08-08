@@ -8,18 +8,62 @@
 import SwiftUI
 import VirtualCore
 
-struct VirtualMachineButtonStyle: ButtonStyle {
+/// This button style achieves a couple of things:
+/// - Gives its label a `vbLibraryButtonPressed` environment value that can be used to react to button presses
+/// - Fixes an annoying behavior common to all standard SwiftUI button styles where pressing the space bar
+/// with one of its subviews in focus would trigger the button's action instead of entering a space in a text field, for example
+struct VBLibraryItemButtonStyle: PrimitiveButtonStyle {
 
-    let vm: VBVirtualMachine
+    @State private var isPressed = false
+
+    /// The rectangle of the button's contents in the local coordinate space.
+    @State private var rect: CGRect = .zero
 
     func makeBody(configuration: Configuration) -> some View {
-        LibraryItemView(
-            vm: vm,
-            name: vm.name,
-            isPressed: configuration.isPressed
-        )
+        configuration.label
+            .environment(\.vbLibraryButtonPressed, isPressed)
+            .overlay {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: VBLibraryButtonSizePreferenceKey.self, value: proxy.size)
+                }
+            }
+            .onPreferenceChange(VBLibraryButtonSizePreferenceKey.self) { rect = CGRect(origin: .zero, size: $0) }
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local).onChanged { value in
+                /// Replicate standard button behavior where dragging outside the button cancels the click.
+                isPressed = rect.contains(value.location)
+            }.onEnded { _ in
+                /// If the button is not currently pressed, then don't perform the action.
+                guard isPressed else { return }
+
+                configuration.trigger()
+
+                isPressed = false
+            })
     }
 
+}
+
+struct VBLibraryButtonSizePreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
+extension PrimitiveButtonStyle where Self == VBLibraryItemButtonStyle {
+    static var vbLibraryItem: VBLibraryItemButtonStyle { VBLibraryItemButtonStyle() }
+}
+
+private struct VBLibraryItemButtonPressedEnvironmentKey: EnvironmentKey {
+    static var defaultValue = false
+}
+private extension EnvironmentValues {
+    var vbLibraryButtonPressed: VBLibraryItemButtonPressedEnvironmentKey.Value {
+        get { self[VBLibraryItemButtonPressedEnvironmentKey.self] }
+        set { self[VBLibraryItemButtonPressedEnvironmentKey.self] = newValue }
+    }
 }
 
 @MainActor
@@ -29,9 +73,11 @@ struct LibraryItemView: View {
 
     @State var vm: VBVirtualMachine
     @State var name: String
-    var isPressed = false
 
-    @State private var thumbnail: Image?
+    @Environment(\.vbLibraryButtonPressed)
+    private var isPressed
+
+    @State private var thumbnail = Image(nsImage: .thumbnailPlaceholder)
 
     var nameFieldFocus = BoolSubject()
 
@@ -47,9 +93,10 @@ struct LibraryItemView: View {
                 Text(name)
             } editableContent: { name in
                 TextField("VM Name", text: name)
+                    .onSubmit { rename(name.wrappedValue) }
             } validate: { name in
                 do {
-                    try VMLibraryController.shared.validateNewName(name, for: vm)
+                    try library.validateNewName(name, for: vm)
                     return true
                 } catch {
                     return false
@@ -62,12 +109,10 @@ struct LibraryItemView: View {
         .padding(.bottom, 12)
         .background(Material.thin, in: backgroundShape)
         .background {
-            if let image = vm.thumbnailImage() {
-                Image(nsImage: image)
-                    .resizable()
-                    .blur(radius: 22)
-                    .opacity(isPressed ? 0.1 : 0.4)
-            }
+            thumbnail
+                .resizable()
+                .blur(radius: 22)
+                .opacity(isPressed ? 0.1 : 0.4)
         }
         .clipShape(backgroundShape)
         .shadow(color: Color.black.opacity(0.14), radius: 12)
@@ -76,24 +121,24 @@ struct LibraryItemView: View {
         .onAppear { refreshThumbnail() }
         .onReceive(vm.didInvalidateThumbnail) { refreshThumbnail() }
         .contextMenu { contextMenuItems }
-        .onChange(of: name) { [name] newName in
-            guard newName != name else { return }
+        .task(id: vm.name) { self.name = vm.name }
+    }
 
-            do {
-                try VMLibraryController.shared.rename(vm, to: newName)
-            } catch {
-                NSAlert(error: error).runModal()
-            }
-        }
-        .onChange(of: vm.name) { [vm] updatedName in
-            guard updatedName != vm.name else { return }
-            self.name = updatedName
+    private func rename(_ newName: String) {
+        guard newName != vm.name else { return }
+
+        do {
+            try library.rename(vm, to: name)
+        } catch {
+            NSAlert(error: error).runModal()
         }
     }
 
     private func refreshThumbnail() {
         if let nsImage = vm.thumbnailImage() {
             thumbnail = Image(nsImage: nsImage)
+        } else {
+            thumbnail = Image(nsImage: .thumbnailPlaceholder)
         }
     }
 
@@ -103,24 +148,12 @@ struct LibraryItemView: View {
 
     @ViewBuilder
     private var thumbnailView: some View {
-        if let image = thumbnail {
-            image
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottom)
-                .clipped()
-                .aspectRatio(16/9, contentMode: .fit)
-        } else {
-            ZStack {
-                Image(systemName: "photo.fill")
-                    .font(.title)
-                    .opacity(0.6)
-
-                Rectangle()
-                    .foregroundColor(.secondary)
-            }
-            .frame(minHeight: 140)
-        }
+        thumbnail
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .bottom)
+            .clipped()
+            .aspectRatio(16/9, contentMode: .fit)
     }
 
     @ViewBuilder
@@ -146,10 +179,18 @@ struct LibraryItemView: View {
         }
         .disabled(isVMBooted)
 
+        #if DEBUG
+        Button {
+            NSWorkspace.shared.open(vm.metadataDirectoryURL)
+        } label: {
+            Text("Open Data Folder…")
+        }
+        #endif
+
         Divider()
 
         Button {
-            VMLibraryController.shared.performMoveToTrash(for: vm)
+            library.performMoveToTrash(for: vm)
         } label: {
             Text("Move to Trash")
         }
@@ -159,7 +200,7 @@ struct LibraryItemView: View {
     private func duplicate() {
         Task {
             do {
-                try VMLibraryController.shared.duplicate(vm)
+                try library.duplicate(vm)
             } catch {
                 NSAlert(error: error).runModal()
             }
@@ -172,7 +213,7 @@ extension VMLibraryController {
     func performMoveToTrash(for vm: VBVirtualMachine) {
         Task {
             do {
-                try await VMLibraryController.shared.moveToTrash(vm)
+                try await moveToTrash(vm)
             } catch {
                 NSAlert(error: error).runModal()
             }

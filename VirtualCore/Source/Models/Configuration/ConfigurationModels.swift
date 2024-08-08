@@ -45,6 +45,9 @@ public struct VBMacConfiguration: Hashable, Codable {
     @DecodableDefault.True
     public var guestAdditionsEnabled = true
 
+    @DecodableDefault.False
+    public var rosettaSharingEnabled = false
+
     @DecodableDefault.True public var captureSystemKeys = true
 
     public var hasSharedFolders: Bool { !sharedFolders.filter(\.isEnabled).isEmpty }
@@ -334,7 +337,9 @@ public struct VBSharedFolder: Identifiable, Hashable, Codable {
     /// mkdir -p ~/Desktop/VirtualBuddyShared && mount -t virtiofs VirtualBuddyShared ~/Desktop/VirtualBuddyShared
     /// ```
     public static let virtualBuddyShareName = "VirtualBuddyShared"
-    
+
+    public static let rosettaShareName = "Rosetta"
+
     public init(id: UUID = UUID(), url: URL, isEnabled: Bool = true, isReadOnly: Bool = false, customMountPointName: String? = nil) {
         self.id = id
         self.url = url
@@ -581,13 +586,7 @@ public extension VBStorageDevice {
         }
     }
 
-    static var hostSupportsUSBMassStorage: Bool {
-        if #available(macOS 13.0, *) {
-            return true
-        } else {
-            return false
-        }
-    }
+    static var hostSupportsUSBMassStorage: Bool { true }
 
     func diskImageExists(for vm: VBVirtualMachine) -> Bool {
         let url = vm.diskImageURL(for: self)

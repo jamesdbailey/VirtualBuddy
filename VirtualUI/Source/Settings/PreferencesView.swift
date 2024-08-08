@@ -13,9 +13,11 @@ import DeepLinkSecurity
 /// which is the only preference in common between legacy OS (Monterey) and modern OSes (Ventura and later).
 public struct PreferencesView: View {
     var deepLinkSentinel: () -> DeepLinkSentinel
+    @Binding var enableAutomaticUpdates: Bool
 
-    public init(deepLinkSentinel: @escaping @autoclosure () -> DeepLinkSentinel) {
+    public init(deepLinkSentinel: @escaping @autoclosure () -> DeepLinkSentinel, enableAutomaticUpdates: Binding<Bool>) {
         self.deepLinkSentinel = deepLinkSentinel
+        self._enableAutomaticUpdates = enableAutomaticUpdates
     }
 
     @EnvironmentObject var container: VBSettingsContainer
@@ -29,12 +31,8 @@ public struct PreferencesView: View {
 
     public var body: some View {
         Group {
-            if #available(macOS 13.0, *) {
-                ModernSettingsView(libraryPathText: $libraryPathText, setLibraryPath: setLibraryPath, showOpenPanel: showOpenPanel)
-                    .environmentObject(deepLinkSentinel())
-            } else {
-                LegacyPreferencesView(libraryPathText: $libraryPathText, setLibraryPath: setLibraryPath, showOpenPanel: showOpenPanel)
-            }
+            ModernSettingsView(libraryPathText: $libraryPathText, enableAutomaticUpdates: $enableAutomaticUpdates, setLibraryPath: setLibraryPath, showOpenPanel: showOpenPanel)
+                .environmentObject(deepLinkSentinel())
         }
         .alert("Error", isPresented: $isShowingErrorAlert, actions: {
             Button("OK") { isShowingErrorAlert = false }
@@ -83,6 +81,7 @@ public struct PreferencesView: View {
 @available(macOS 13.0, *)
 private struct ModernSettingsView: View {
     @Binding var libraryPathText: String
+    @Binding var enableAutomaticUpdates: Bool
     var setLibraryPath: (String) -> Void
     var showOpenPanel: () -> Void
 
@@ -124,6 +123,14 @@ private struct ModernSettingsView: View {
             }
 
             Section {
+                Toggle("Automatically check for updates", isOn: $enableAutomaticUpdates)
+
+                betaSection
+            } header: {
+                Text("App Updates")
+            }
+
+            Section {
                 LabeledContent("Control which apps can automate VirtualBuddy") {
                     Button {
                         showingAutomationSecuritySheet = true
@@ -147,79 +154,67 @@ private struct ModernSettingsView: View {
         DeepLinkAuthManagementUI(sentinel: sentinel)
     }
 
-    
-}
-
-
-
-
-
-
-
-
-
-
-
-// MARK: - Previews
-
-#if DEBUG
-private extension VBSettingsContainer {
-    static let preview: VBSettingsContainer = {
-        VBSettingsContainer(with: UserDefaults())
-    }()
-}
-
-@available(macOS 14.0, *)
-#Preview("Settings") {
-    PreferencesView(deepLinkSentinel: .preview)
-        .environmentObject(VBSettingsContainer.preview)
-}
-#endif
-
-
-
-
-
-
-
-
-
-
-
-// MARK: - Legacy Preferences UI (macOS Monterey)
-
-/// Settings view for macOS Monterey.
-/// Should not be getting any new features since Monterey support is in maintenance mode.
-private struct LegacyPreferencesView: View {
-
-    @EnvironmentObject var container: VBSettingsContainer
-
-    private var settings: VBSettings {
-        get { container.settings }
-        nonmutating set { container.settings = newValue }
-    }
-
-    @Binding var libraryPathText: String
-    var setLibraryPath: (String) -> Void
-    var showOpenPanel: () -> Void
-
-    var body: some View {
-        DecentFormView {
-            DecentFormControl {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Library Path:", text: $libraryPathText)
-                        .onSubmit {
-                            setLibraryPath(libraryPathText)
-                        }
-                        .frame(minWidth: 200, maxWidth: 300)
-
-                    Button("Choose…", action: showOpenPanel)
+    @ViewBuilder
+    private var betaSection: some View {
+        LabeledContent("Beta Updates") {
+            if settings.updateChannel == .beta {
+                Button("Disable") {
+                    confirmDisableBeta()
                 }
-            } label: {
-                Text("Library Path:")
+            } else {
+                Button("Join Beta") {
+                    confirmJoinBeta()
+                }
             }
         }
-        .padding()
+    }
+
+    private func confirmDisableBeta() {
+        if AppUpdateChannel.defaultChannel(for: .current) == .beta {
+            /// If beta is disabled while running a beta release, user needs to reinstall release build manually.
+            confirmDisableBetaNeedsReinstall()
+        } else {
+            /// If beta is disabled while running a non-beta release, no further action is needed.
+            settings.updateChannel = .release
+        }
+    }
+
+    /// Shown when user disables beta while running a beta release, which requires reinstalling a release version
+    /// in order to effectivelly get out of the beta train.
+    private func confirmDisableBetaNeedsReinstall() {
+        let alert = NSAlert()
+        alert.messageText = "Disable VirtualBuddy Beta"
+        alert.informativeText = "In order to go back to the release version of VirtualBuddy, please download the latest release from GitHub and replace the current version you have installed."
+        alert.addButton(withTitle: "Open Website")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        settings.updateChannel = .release
+
+        guard let url = URL(string: "https://github.com/insidegui/VirtualBuddy/releases/latest") else { return }
+
+        NSWorkspace.shared.open(url)
+    }
+
+    private func confirmJoinBeta() {
+        let alert = NSAlert()
+        alert.messageText = "Join VirtualBuddy Beta"
+        alert.informativeText = """
+        Would like to join the beta and receive pre-release updates for testing?
+        
+        If you decide to stop receiving beta updates in the future, you will have to manually download and install the release version of VirtualBuddy.
+        """
+        alert.addButton(withTitle: "Join Beta")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        settings.updateChannel = .beta
     }
 
 }
@@ -248,3 +243,28 @@ struct LibraryPathError: LocalizedError {
 
     init(_ msg: String) { self.errorDescription = msg }
 }
+
+
+
+
+
+
+
+
+
+
+// MARK: - Previews
+
+#if DEBUG
+private extension VBSettingsContainer {
+    static let preview: VBSettingsContainer = {
+        VBSettingsContainer(with: UserDefaults())
+    }()
+}
+
+@available(macOS 14.0, *)
+#Preview("Settings") {
+    PreferencesView(deepLinkSentinel: .preview, enableAutomaticUpdates: .constant(true))
+        .environmentObject(VBSettingsContainer.preview)
+}
+#endif

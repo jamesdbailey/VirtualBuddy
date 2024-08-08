@@ -19,6 +19,19 @@ protocol VirtualMachineConfigurationHelper {
     func createEntropyDevices() -> [VZVirtioEntropyDeviceConfiguration]
     @available(macOS 13.0, *)
     func createSpiceAgentConsoleDeviceConfiguration() -> VZVirtioConsoleDeviceConfiguration?
+    @available(macOS 15.0, *)
+    func createUSBControllers() -> [VZUSBControllerConfiguration]
+}
+
+func createVZDiskImageStorageDeviceAttachment(url: URL, readOnly: Bool, guestType: VBGuestType) throws -> VZDiskImageStorageDeviceAttachment {
+    if guestType == .linux {
+        // Linux guest is bound to cause IO errors.
+        // Referring to https://github.com/utmapp/UTM/issues/4840, seems like setting the cachingMode to cached
+        // fixes this IO errors and disk corruption issues for Linux guest.
+        return try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly, cachingMode: .cached, synchronizationMode: .fsync)
+    } else {
+        return try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly)
+    }
 }
 
 extension VirtualMachineConfigurationHelper {
@@ -34,7 +47,7 @@ extension VirtualMachineConfigurationHelper {
             }
 
             let bootURL = vm.diskImageURL(for: bootDiskImage)
-            let diskImageAttachment = try VZDiskImageStorageDeviceAttachment(url: bootURL, readOnly: false)
+            let diskImageAttachment = try createVZDiskImageStorageDeviceAttachment(url: bootURL, readOnly: false, guestType: vm.configuration.systemType)
 
             let disk = VZVirtioBlockDeviceConfiguration(attachment: diskImageAttachment)
 
@@ -57,6 +70,9 @@ extension VirtualMachineConfigurationHelper {
     @available(macOS 13.0, *)
     func createSpiceAgentConsoleDeviceConfiguration() -> VZVirtioConsoleDeviceConfiguration? { nil }
 
+    @available(macOS 15.0, *)
+    func createUSBControllers() -> [VZUSBControllerConfiguration] { [] }
+
 }
 
 extension VBVirtualMachine {
@@ -68,7 +84,7 @@ extension VBVirtualMachine {
                 guard device.isEnabled, !device.isBootVolume else { continue }
 
                 let url = diskImageURL(for: device)
-                let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: device.isReadOnly)
+                let attachment = try createVZDiskImageStorageDeviceAttachment(url: url, readOnly: device.isReadOnly, guestType: configuration.systemType)
 
                 output.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
             }
@@ -142,9 +158,6 @@ extension VBPointingDevice {
             case .mouse:
                 return [VZUSBScreenCoordinatePointingDeviceConfiguration()]
             case .trackpad:
-                guard #available(macOS 13.0, *) else {
-                    throw Failure("The trackpad pointing device is only available on macOS 13 and later")
-                }
                 return [
                     VZMacTrackpadConfiguration(),
                     VZUSBScreenCoordinatePointingDeviceConfiguration()
@@ -188,16 +201,30 @@ extension VBMacConfiguration {
                 
                 directories[folder.effectiveMountPointName] = dir
             }
-            
+
+            var devices: [VZDirectorySharingDeviceConfiguration] = []
+
+            // standard directory share
             try VZVirtioFileSystemDeviceConfiguration.validateTag(VBSharedFolder.virtualBuddyShareName)
-            
-            let share = VZMultipleDirectoryShare(directories: directories)
-            let device = VZVirtioFileSystemDeviceConfiguration(tag: VBSharedFolder.virtualBuddyShareName)
-            device.share = share
-            return [device]
+            do {
+                let share = VZMultipleDirectoryShare(directories: directories)
+                let device = VZVirtioFileSystemDeviceConfiguration(tag: VBSharedFolder.virtualBuddyShareName)
+                device.share = share
+                devices.append(device)
+            }
+
+            if self.systemType == .linux && self.rosettaSharingEnabled {
+                // Rosetta directory share for Linux VMs
+                try VZVirtioFileSystemDeviceConfiguration.validateTag(VBSharedFolder.rosettaShareName)
+                let share = try VZLinuxRosettaDirectoryShare()
+                let device = VZVirtioFileSystemDeviceConfiguration(tag: VBSharedFolder.rosettaShareName)
+                device.share = share
+                devices.append(device)
+            }
+
+            return devices
         }
     }
-    
 }
 
 extension VBSharedFolder {

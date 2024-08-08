@@ -12,9 +12,10 @@ extension Error {
     var log: String { String(describing: self) }
 }
 
-extension Logger {
-    init<T>(for type: T.Type) {
-        self.init(subsystem: VirtualCoreConstants.subsystemName, category: String(describing: type))
+public extension Logger {
+    init<T>(for type: T.Type, label: String? = nil) {
+        let suffix = label.flatMap { "(\($0))" } ?? ""
+        self.init(subsystem: VirtualCoreConstants.subsystemName, category: "\(String(describing: type))\(suffix)")
     }
 }
 

@@ -2,6 +2,7 @@ import Cocoa
 import Combine
 import OSLog
 import CoreImage
+import VirtualCore
 
 final class VMScreenshotter {
 
@@ -12,104 +13,118 @@ final class VMScreenshotter {
     let screenshotSubject: Subject
 
     private weak var view: NSView?
-    private let interval: TimeInterval
-    
+    private weak var vm: VZVirtualMachine?
+    private var timingController: VMScreenshotTimingController!
+
     init(interval: TimeInterval, screenshotSubject: Subject) {
-        assert(interval > 1, "The minimum interval is 1 second")
-        
-        self.interval = max(1, interval)
         self.screenshotSubject = screenshotSubject
+        self.timingController = VMScreenshotTimingController(interval: interval) { [weak self] in
+            guard let self else { return }
+            try await self.capture()
+        }
     }
     
-    private var timer: Timer?
-    
-    func activate(with view: NSView) {
+    func activate(with view: NSView, vm: VZVirtualMachine?) {
         invalidate()
         
         self.view = view
-
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true, block: { [weak self] _ in
-            self?.timerFired()
-        })
+        self.vm = vm
+        
+        timingController.activate()
     }
     
     func invalidate() {
-        pendingCapture?.cancel()
-        timer?.invalidate()
-        timer = nil
-        
+        timingController.invalidate()
+
         guard let previousScreenshotData else { return }
 
         self.screenshotSubject.send(previousScreenshotData)
     }
-    
-    private func timerFired() {
-        capture()
-    }
-    
+
     // Used to restore to the second-to-last screenshot when the machine shuts down,
     // so as to avoid having the screenshots all be the same (the Dock moving down and no Menu Bar).
     private var previousScreenshotData: Data?
-    
-    private var pendingCapture: Task<(), Error>?
-    
-    func capture() {
-        pendingCapture = Task.detached(priority: .utility) { [weak self] in
-            guard let self = self else { return }
 
-            let shot = await MainActor.run {
-                self.takeScreenshot()
-            }
+    func capture() async throws {
+        let data = await takeScreenshot()
 
-            guard let shot else { return }
+        guard let data else { return }
 
-            try Task.checkCancellation()
-            
-            guard let data = shot.tiffRepresentation(using: .ccittfax4, factor: 0.8) else { return }
-            
-            self.previousScreenshotData = data
-            
-            try Task.checkCancellation()
-            
-            await MainActor.run {
-                self.screenshotSubject.send(data)
-            }
+        try Task.checkCancellation()
+
+        self.previousScreenshotData = data
+
+        try Task.checkCancellation()
+
+        await MainActor.run {
+            self.screenshotSubject.send(data)
         }
     }
 
     private lazy var context = CIContext()
 
-    @MainActor
-    private func takeScreenshot() -> NSImage? {
-        guard let view, let rootLayer = view.layer else {
-            logger.fault("Couldn't get view and/or root layer for screenshot")
-            return nil
-        }
-        
-//        This caused flickering in the view:
-//        if let surface = rootLayer.sublayers?.first?.sublayers?.first?.contents as? IOSurface {
-//            let ciImage = CIImage(ioSurface: surface)
-//            let rect = CGRect(x: 0, y: 0, width: surface.width, height: surface.height)
-//            guard let cgImage = context.createCGImage(ciImage, from: rect) else {
-//                logger.error("Failed to create CG image from IOSurface")
-//                return nil
-//            }
-//            let result = NSImage(cgImage: cgImage, size: rect.size)
-//            return result
-//        } else {
-//            logger.warning("Couldn't get IOSurface for screenshot, falling back to root layer")
+    private let imageOptions = [
+        kCGImageDestinationLossyCompressionQuality: 1,
+        kCGImageDestinationImageMaxPixelSize: 4096
+    ] as CFDictionary
 
-            return NSImage(size: view.bounds.size, flipped: false) { [weak rootLayer] rect in
-                guard let rootLayer else { return false }
-                guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+    private func takeScreenshot() async -> Data? {
+        guard let cgImage = await takeScreenshotCGImage() else { return nil }
 
-                rootLayer.render(in: ctx)
-
-                return true
-            }
-//        }
+        return try? cgImage.vb_heicEncodedData(options: imageOptions)
     }
 
 }
 
 extension NSImage: @unchecked Sendable { }
+
+// MARK: - Screenshot Taking
+
+private extension VMScreenshotter {
+    /// Uses AppKit to take the screenshot from the virtual machine view itself.
+    /// This is always used in macOS 13, and can be used in macOS 14 or later if the Virtualization SPI is not available.
+    @MainActor
+    func takeScreenshotUsingView() -> CGImage? {
+        guard let view else { return nil }
+
+        let bounds = view.bounds
+
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+
+        guard let bitmapRep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+
+        view.cacheDisplay(in: bounds, to: bitmapRep)
+
+        guard let cgImage = bitmapRep.cgImage else { return nil }
+
+        return cgImage
+    }
+
+    /// Uses new SPI in Virtualization on macOS 14 to take the screenshot from the `VZVirtualMachine` instance.
+    /// Currently only takes a screenshot from a single display.
+    @available(macOS 14.0, *)
+    func takeScreenshotUsingVirtualizationSPI() async -> CGImage? {
+        do {
+            guard let vm else {
+                throw Failure("VM not available")
+            }
+
+            let image = try await NSImage.screenshot(from: vm)
+
+            return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        } catch {
+            logger.error("SPI screenshot failed, falling back to view snapshot. Error: \(error, privacy: .public)")
+            return await takeScreenshotUsingView()
+        }
+    }
+
+    /// Returns a `CGImage` with a screenshot of the VM in its current state,
+    /// using the best available screenshotting method.
+    func takeScreenshotCGImage() async -> CGImage? {
+        if #available(macOS 14.0, *) {
+            return await takeScreenshotUsingVirtualizationSPI()
+        } else {
+            return await takeScreenshotUsingView()
+        }
+    }
+}
